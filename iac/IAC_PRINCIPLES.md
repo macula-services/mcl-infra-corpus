@@ -7,69 +7,88 @@ stage: stable
 
 # IaC: Principles
 
-*Declare the desired state. Apply it any number of times, get the same result. Replace instead of mutate. These three sentences are the whole discipline.*
+*Infrastructure as Code means the repository, not somebody's shell history, says what the infrastructure is. Three ideas make that true in practice: declare the end state, make applying it repeatable, and replace things rather than patch them.*
 
 ---
 
-## Declarative desired state
+## Declare the end state
 
-In IaC, a declarative language describes the **desired state** of a
-system; the tool derives the steps to bring reality into compliance
-with it. You do not write "create the VM, then install the package" —
-you write "a VM with this package exists", and the tool computes the
-transition.
+There are two ways to write automation:
 
-This is the same shape as Kubernetes' reconciliation loop and the
-event-sourcing read-model rebuild: state is declared, the engine
-converges.
+- **Imperative:** a list of steps. "Create a VM. Install nginx. Open
+  port 443." Run it twice and you may get two VMs.
+- **Declarative:** a description of the result. "One VM named `web1`
+  exists, nginx is installed, 443 is open." The tool works out which
+  steps are needed from wherever reality currently is.
+
+Declarative code reads as documentation of the system and survives
+partial failures, because the next run just computes a new set of
+steps. Terraform and Kubernetes manifests are declarative; Ansible
+playbooks are ordered steps, but each step is written declaratively
+(`state: present`).
 
 ---
 
 ## Idempotency
 
-Applying an operation multiple times produces the same result as
-applying it once. In IaC terms: *regardless of the starting state and
-the number of times it is executed, the end state remains the same.*
+An operation is idempotent when running it once or ten times leaves
+the system in the same state. For IaC that means: apply, apply again,
+and the second run changes nothing.
 
-What it buys:
+Why it matters:
 
-- **Retries are free.** A failed apply is re-run, not repaired.
-- **Rollback is thinkable.** The previous state is just another
-  declared state.
-- **No inconsistent outcomes** from half-applied changes.
+- A failed or interrupted run is fixed by running it again.
+- Scheduled re-applies become safe, and a non-empty second run is a
+  signal that something outside the code changed things.
+- Reviews compare two descriptions of the system, not two histories.
 
-Stateful tools (Terraform) reach idempotency by recording what they
-manage and diffing against it; Ansible reaches it task by task, where
-each task checks before it changes.
-
----
-
-## Immutability — the cure for drift
-
-**Configuration drift** is what happens when changes are made outside
-the code: environments diverge in ways that are hard to reproduce and
-harder to debug. Mutable infrastructure invites drift; long-lived
-servers accumulate it.
-
-**Immutable infrastructure** replaces rather than alters: a change
-produces a new artifact (image, VM), and the old one is discarded.
-Nothing is ever patched in place, so every environment is reproducible
-by construction — what runs is what the code built.
+Tools get there in different ways. Terraform keeps a state file and
+diffs it against the configuration and the live resources. Ansible
+modules check the current value before changing it and report `ok` or
+`changed` per task. A hand-written script is idempotent only if every
+line checks first; `mkdir -p` is, `useradd` is not.
 
 ---
 
-## The practices that hold it together
+## Replace, don't patch
 
-| Practice | Why |
-|----------|-----|
-| Everything in source control | Scripts, pipelines, configs — the VCS is the change log |
-| One tool owns one resource class | Terraform owns provisioning; Ansible owns configuration; overlap = two sources of truth |
-| Secrets never in the repo | State and config must not carry credentials |
-| Plan before apply | Read the diff of what *will* change; unexpected lines in the plan are drift caught early |
+**Drift** is the gap between what the code says and what is running,
+created every time someone fixes a box by hand. Long-lived servers
+collect it until nobody can rebuild them.
 
-## Why it matters
+**Immutable infrastructure** avoids it: a change produces a new
+artifact (an image, a VM template), new instances are started from it,
+and the old ones are thrown away. Nothing is edited in place, so every
+running instance matches a build that can be reproduced. The price is
+a build pipeline and a way to keep state (databases, volumes) outside
+the replaceable part.
 
-IaC is the bridge that lets infrastructure ride the software
-toolchain: review, versioning, CI, rollback. The two principles —
-idempotency and immutability — are what make that bridge hold:
-without them the repo describes an intention, not a state.
+Few setups are purely immutable. A common compromise: immutable images
+for the workload, declarative config management for the host underneath.
+
+---
+
+## Working rules
+
+| Rule | Reason |
+|------|--------|
+| Keep all of it in version control | History, review and rollback come for free |
+| One tool owns each kind of resource | Two tools managing the same thing will fight and drift |
+| No secrets in the repo or in plain state | IaC artifacts get copied, cached and shared |
+| Always look at the plan or dry run first | Surprises in the diff are cheap there and expensive after |
+| Re-apply regularly | Drift found early is small |
+
+## How it fits the corpus
+
+[Terraform](TERRAFORM.md) and [Ansible](ANSIBLE.md) are the two
+implementations covered here, and [bare-metal
+provisioning](BARE_METAL_PROVISIONING.md) extends the same loop down to
+physical machines. The "declare, then converge" shape is the same one
+[Kubernetes](../containers/KUBERNETES.md) uses for workloads.
+
+## Sources
+
+- *Architecting AWS with Terraform*. Erol Kavas. Packt Publishing, 2023. https://www.packtpub.com/en-us/product/architecting-aws-with-terraform-9781803248561
+- HashiCorp, "What is Terraform?". https://developer.hashicorp.com/terraform/intro
+- HashiCorp, "State". https://developer.hashicorp.com/terraform/language/state
+- Ansible Community Documentation, "Ansible playbooks". https://docs.ansible.com/projects/ansible/latest/playbook_guide/playbooks_intro.html

@@ -7,82 +7,105 @@ stage: stable
 
 # Containers: Docker
 
-*Images are the immutable template; containers are running processes sandboxed by namespaces and limited by cgroups. The rest is plumbing.*
+*An image is a frozen filesystem plus run instructions; a container is an ordinary Linux process started from it inside its own namespaces and cgroup. Docker is the tooling that builds, ships and starts those processes.*
 
 ---
 
-## The kernel primitives
+## What a container actually is
 
-Containers are only possible because Linux supplies the primitives:
+No virtual machine and no separate kernel are involved. A container is a
+normal process tree on the host kernel, given a restricted view of the
+system:
 
-| Primitive | What it does |
-|-----------|--------------|
-| **Namespaces** | Sandbox a resource class: pid (process ids), net (network), mnt (mounts), user, uts (hostname), ipc. A container sees its own world. |
-| **cgroups** | Limit and account resources: CPU time, memory, io. Prevents the noisy-neighbor problem — one container consuming the whole host. |
-| **Layers** | Filesystem deltas stacked into a single view; the unit of image caching. |
+| Kernel feature | Role in a container |
+|----------------|---------------------|
+| **Namespaces** | Give the process its own view of one resource type: process ids (pid), network stack (net), mount table (mnt), users (user), hostname (uts), IPC. Inside, the process sees only its own world. |
+| **cgroups** | Cap and meter CPU, memory and block I/O, so one workload cannot starve the host. `docker run --memory` and `--cpus` set these. |
+| **Union / overlay filesystem** | Stacks read-only image layers with one thin writable layer on top, so many containers share the same image bytes on disk. |
 
-A container is *one or more processes encapsulated by Linux namespaces
-and restricted by cgroups* — nothing more. There is no container
-process; there is no virtual machine.
+`ps` on the host shows container processes like any other; that is a
+useful sanity check when something looks wrong.
 
 ---
 
-## The runtime stack
+## Who does what
 
 ```
-Docker Engine        ← API, networking, plugins, the CLI talks to this
-    │
-Container runtime
-    ├── containerd   ← image management, networking, extensibility
-    └── runc         ← low-level container creation and management
-    │
-Linux OS             ← namespaces, cgroups
+docker CLI ──REST──▶ dockerd          builds images, manages networks, volumes, the API
+                        │
+                    containerd        container lifecycle: pull, create, start, stop
+                        │
+                      runc            sets up namespaces + cgroups, execs the process
+                        │
+                   Linux kernel
 ```
 
-The runtime owns the container lifecycle: pull the image from a
-registry, create the container from it, start, stop, remove. The engine
-adds the API layer and the developer experience.
+The client can talk to a daemon on the same machine or a remote one.
+containerd uses runc by default; other OCI runtimes can be swapped in.
+Podman reaches the same result without a long-running daemon, which is
+why the lab box in this fleet runs it under systemd instead.
 
 ---
 
-## Images vs containers
+## Images and the layer cache
 
-| | Image | Container |
-|---|---|---|
-| Nature | Immutable template | Running instance |
-| Built from | A Dockerfile | An image |
-| Has | Filesystem layers, metadata (entrypoint, env, user) | An isolated process tree + writable layer |
-| Analogy | A class | An object |
+An image is built from a `Dockerfile`. Instructions that change the
+filesystem (`RUN`, `COPY`, `ADD`) each add a layer; the result is
+addressed by a content digest.
 
-An image's layers cache independently: change the last line of a
-Dockerfile and only the layers above the change rebuild. Order the
-Dockerfile so that what changes often comes last.
-
----
-
-## The build contract
+Cache rule: when an instruction or its inputs change, that layer **and
+every layer after it** is rebuilt, even if the later steps would produce
+the same bytes. So put the slow, stable steps first and the frequently
+edited ones last:
 
 ```dockerfile
-FROM base:latest          # the base image
-COPY app /app             # layer: the app
-RUN build                  # layer: build artifacts
-ENTRYPOINT ["/app/run"]    # what executes
+FROM debian:12-slim@sha256:<digest>   # pinned base
+COPY deps.lock /src/                  # changes rarely
+RUN fetch-deps /src/deps.lock         # cached until the lock changes
+COPY . /src                           # changes on every commit
+RUN build /src
+CMD ["/src/bin/app"]
 ```
 
-Rules of thumb:
+---
 
-- **Pin the base** — by digest in production; `latest` moves.
-- **One process per container.** The container dies with its main
-  process; multi-process images reinvent the init system poorly.
-- **Minimize layers.** Each `RUN` is a layer; chained commands and
-  multi-stage builds keep images small and attack surface down.
-- **The writable layer is scratch.** State belongs in volumes; a
-  container that stores data in its layer loses it on removal.
+## Practices that pay off
 
-## Why it matters
+- **Pin the base by digest.** A tag like `latest` or `12` can be
+  repointed by the publisher; a digest cannot.
+- **One concern per container.** The container lives as long as its
+  main process; bundling several services forces you to ship your own
+  supervisor. Scale and restart pieces independently instead.
+- **Multi-stage builds.** Compile in a fat build stage, copy only the
+  artifact into a small runtime stage. Smaller images, less to patch.
+- **Treat containers as disposable.** The writable layer disappears
+  with the container. Anything worth keeping goes in a volume or an
+  external store.
 
-Docker's contribution is not the kernel primitives — they predate it —
-it is the **supply-chain contract**: one artifact, built once, run
-anywhere, described by a Dockerfile. Every service the mesh runs ships
-as an image pinned by digest; the digest is the deploy unit and the
-rollback target.
+---
+
+## Pitfalls
+
+- Secrets passed with `ENV` or copied in a `RUN` step stay in the image
+  history even if a later step deletes them; use build secrets.
+- A cache hit on `RUN apt-get update` can hide stale package lists; keep
+  update and install in the same `RUN`.
+- Running as root inside the container is still root on the kernel's
+  terms unless user namespaces are configured; set `USER`.
+
+## How it fits the corpus
+
+Images are the deploy unit for every service in this fleet: pinned by
+digest, the digest is both what runs and the rollback target. The
+[Kubernetes](KUBERNETES.md) note covers scheduling many containers;
+[systemd](../linux/SYSTEMD.md) covers supervising them on a single box.
+
+## Sources
+
+- *The Ultimate Docker Container Book*, 3rd edition. Dr. Gabriel N. Schenker. Packt Publishing, 2023. https://www.packtpub.com/en-us/product/the-ultimate-docker-container-book-9781804613986
+- Docker Docs, "What is Docker?" (architecture, namespaces). https://docs.docker.com/get-started/docker-overview/
+- Docker Docs, "Alternative container runtimes" (containerd and runc). https://docs.docker.com/engine/daemon/alternative-runtimes/
+- Docker Docs, "Docker build cache". https://docs.docker.com/build/cache/
+- Docker Docs, "Building best practices". https://docs.docker.com/build/building/best-practices/
+- Docker Docs, "Resource constraints". https://docs.docker.com/engine/containers/resource_constraints/
+- Docker Docs, "Volumes". https://docs.docker.com/engine/storage/volumes/

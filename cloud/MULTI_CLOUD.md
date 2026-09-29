@@ -7,78 +7,99 @@ stage: stable
 
 # Cloud: Multi-Cloud
 
-*Multi-cloud is a deliberate design choice, not an accident of vendors. The principles that make it work are the same ones that make any distributed system work.*
+*Running on more than one provider should be a decision with a named reason, not something that happened because two teams picked different vendors. When it is deliberate, it rests on the same things that make any distributed system portable: clear boundaries, owned interfaces, and careful data placement.*
 
 ---
 
-## Multi-cloud vs hybrid cloud
+## Terms
 
-| Term | Meaning |
-|------|---------|
-| **Hybrid cloud** | Private (on-prem) + public cloud, connected |
-| **Multi-cloud** | Several public providers used deliberately: resilience, leverage, best-of-breed |
+| Term | Means |
+|------|-------|
+| **Hybrid cloud** | Your own hardware or private cloud combined with one or more public providers |
+| **Multi-cloud** | Workloads spread across two or more providers on purpose |
+| **Poly-cloud / best-of-breed** | Each workload on the provider that suits it best, with little cross-provider traffic |
+| **Portable / active-active** | The same workload able to run, or running, on several providers at once |
 
-Multi-cloud is not "lift and shift to two providers" — that doubles the
-operations cost and buys nothing. It is a design decision: which
-workloads live where, and why.
-
----
-
-## The principles of multi-cloud design
-
-### 1. Domain-driven boundaries
-
-Cut the system by **bounded context** (see the beam corpus's domain
-modeling notes), not by provider. A context that owns its data and its
-contracts can move between providers — or span them — without dragging
-the rest along. The alternative, provider-shaped cuts, makes every
-change a cross-provider migration.
-
-### 2. API-first
-
-Contracts over integrations: every context exposes an API, and the
-network is the only thing shared. Provider-native services (queues,
-object storage) hide behind your own interfaces, so swapping a
-provider is a reimplementation of an adapter, not a rewrite.
-
-### 3. Choose cloud-native foundations deliberately
-
-Pick the *technologies* first (container runtime, orchestrator, data
-stores), then map them onto providers — not the reverse. The
-cloud-native layer is the portability layer.
-
-### 4. Data placement is the hard part
-
-Data gravity is real: egress costs and latency mean data must live
-where its consumers live. Replication across providers is the
-expensive case — reserve it for what genuinely needs it (DR,
-compliance), and design eventual consistency into the rest.
+Most real setups are best-of-breed with a few portable pieces. Fully
+portable active-active across providers is rare and expensive.
 
 ---
 
-## The costs to name
+## Good reasons, and weak ones
 
-| Cost | Reality |
-|------|---------|
-| Abstraction overhead | The portability layer is code you write and maintain |
-| Egress fees | Moving data between providers is billed — usually the surprise line |
-| Skill surface | Two providers = two sets of operations knowledge |
-| Weaker per-provider leverage | Spreading spend reduces your discount on any one |
+Good reasons are specific: surviving the loss of a whole provider or
+region, a regulator or customer requiring a jurisdiction or a second
+supplier, a capability only one provider offers, bargaining power at
+large spend, or simply that the best-priced box for this job is at a
+different host.
+
+Weak reasons are vague: "avoid lock-in" with no plan for what would
+trigger a move, or copying the same stack onto two providers without
+changing the design. That doubles the operational work and buys very
+little.
+
+---
+
+## Design principles
+
+1. **Cut along business boundaries.** Split the system into bounded
+   contexts that own their data and expose a contract (see the domain
+   modelling notes in the beam corpus). A context can then live on, or
+   move to, any provider. Splitting by provider instead ("everything on
+   A talks to everything on B") makes every change a cross-provider one.
+2. **Own your interfaces.** Put provider services (queues, object
+   storage, secrets) behind interfaces you define, in the place where
+   you use them. Moving provider then means rewriting an adapter, not
+   the application. Do this for the services you actually depend on,
+   not as a blanket abstraction over everything.
+3. **Pick portable foundations first.** Containers, a common
+   orchestrator or process supervisor, open protocols and IaC tools
+   that span providers (Terraform, Ansible) are what make placement a
+   choice. Deciding the provider first and the technology second tends
+   to bake that provider in.
+4. **Place data deliberately.** Data is the hardest thing to move:
+   egress is billed, latency grows with distance, and consistency across
+   providers is expensive. Keep data next to its main consumers,
+   replicate across providers only where the reason justifies it
+   (disaster recovery, compliance), and design the rest for eventual
+   consistency.
+5. **One way to observe and deploy.** A single pipeline, one
+   observability stack and one identity model across providers, or the
+   second provider becomes a second, poorly-run operation.
+
+---
+
+## Costs to put on the table
+
+| Cost | What it looks like |
+|------|--------------------|
+| Abstraction | Adapters and portability layers you build and maintain |
+| Data transfer | Cross-provider traffic billed per GB, often the biggest surprise |
+| Skills | Each provider has its own IAM, networking and failure modes |
+| Discounts | Split spend earns smaller commitment discounts on each side |
+| Lowest common denominator | Avoiding provider-specific features can mean giving up the best tool |
 
 ## Rules of thumb
 
-- **Default single-cloud.** Multi-cloud is the answer to a *named*
-  problem (resilience, regulation, negotiation), not the default.
-- **Abstract at the seams, not everywhere.** Wrap the provider
-  services you depend on; do not build a cloud-neutral layer over
-  everything — that is a second cloud to maintain.
-- **Measure the egress before you promise the resilience.**
-  Cross-provider DR that costs more than the outage it covers is a
-  plan, not a practice.
+- **Default to one provider** until a named requirement says otherwise.
+- **Price the failover before promising it.** Measure egress and
+  standby cost; a DR setup that costs more than the outage it prevents
+  is not worth running.
+- **Test the move.** Portability that has never been exercised usually
+  is not there.
 
-## Why it matters
+## How it fits the corpus
 
-The mesh's fleet lives on hosted boxes and stations across providers
-already — multi-cloud is the lens for the choices that are being made
-anyway: which box on which provider, what moves, what stays, and what
-it costs to have it elsewhere.
+The fleet already runs on boxes at several hosts, so these principles
+apply to everyday placement decisions: which box where, what may move,
+and what that costs. The money side is in [FinOps](FINOPS.md); the
+tools that make placement repeatable are in
+[IaC principles](../iac/IAC_PRINCIPLES.md) and
+[Terraform](../iac/TERRAFORM.md).
+
+## Sources
+
+- *Multi-Cloud Handbook for Developers*. Subash Natarajan, Jeveen Jacob. Packt Publishing, 2024. https://www.packtpub.com/en-us/product/multi-cloud-handbook-for-developers-9781804618707
+- CNCF Technical Oversight Committee, "Cloud Native Definition". https://github.com/cncf/toc/blob/main/DEFINITION.md
+- FinOps Foundation, "FinOps Framework Overview" (cost allocation and rate optimisation across providers). https://www.finops.org/framework/
+- HashiCorp, "What is Terraform?" (one workflow across providers). https://developer.hashicorp.com/terraform/intro

@@ -7,78 +7,102 @@ stage: stable
 
 # Tooling: Go for Infrastructure
 
-*One static binary, no runtime, a stdlib that already speaks the protocols infrastructure uses. That is why the infra CLI niche belongs to Go.*
+*A Go program compiles to one self-contained executable that you copy to a box and run. That, plus a standard library that already covers HTTP, TLS, JSON and process control, is why so much operations tooling is written in Go.*
 
 ---
 
-## Why Go owns this niche
+## Why Go fits this niche
 
-| Property | What it buys |
+| Property | What you get |
 |----------|--------------|
-| Static single binary | Ship one file to a box; no runtime, no dependency resolution |
-| Cross-compilation | Build for any OS/arch from one machine — `GOOS=linux GOARCH=arm64 go build` |
-| Stdlib coverage | Files, HTTP, JSON/YAML-ish, SSH, exec, TLS — the whole infra surface without a dependency tree |
-| Fast startup | CLIs feel instant; agents and short-lived tools are cheap |
+| Single binary | No interpreter or package install on the target; copy and run. Pure-Go builds are statically linked. |
+| Easy cross-compilation | `GOOS=linux GOARCH=arm64 go build` on a laptop produces a binary for an ARM box. |
+| Broad standard library | HTTP client and server, TLS, JSON, CSV, templates, process execution, structured logging (`log/slog`) |
+| Fast start, modest memory | Fine for short-lived CLIs, cron-style jobs and small agents |
+| Simple concurrency | Goroutines and channels for fanning out over many hosts |
 
-The consequence: the operational tooling around a fleet — CLI
-clients, small daemons, sync agents — is Go-shaped, whatever language
-the services themselves are written in.
-
----
-
-## The patterns every infra tool repeats
-
-### 1. Flags in, structured output out
-
-```
-tool --target host --format json
-```
-
-- Input: flags or environment, nothing interactive.
-- Output: JSON (or YAML) on stdout, logs on stderr. The contract that
-  makes tools composable in scripts and pipelines.
-- Exit codes mean something: 0 = done, non-zero = failed, distinct
-  codes for distinct failures where callers branch on them.
-
-### 2. The work comes from the stdlib
-
-| Task | What does it |
-|-------|--------------|
-| Filesystem operations | `os`, `path/filepath` — walk, copy, watch |
-| Data formats | `encoding/json`, `encoding/csv`, `encoding/xml` |
-| Remote data | `net/http` with contexts and timeouts |
-| Command execution | `os/exec` — run things, capture output |
-| Remote execution | `golang.org/x/crypto/ssh` — the SSH library every fleet tool uses |
-| Observability | OpenTelemetry SDK — traces and metrics from day one |
-
-The rule: reach for the stdlib first. An infra tool with fifty
-dependencies has lost the property that justified Go in the first
-place.
-
-### 3. Contexts and timeouts are not optional
-
-Every network call, every `exec`, every SSH session takes a
-`context.Context` with a deadline. Infra tools run unattended against
-unreliable targets; the tool that hangs is the tool nobody trusts in
-a cron job.
+Many of the tools in this space (Docker, Kubernetes, Terraform,
+Prometheus) are written in Go, so their client libraries are Go-first
+as well.
 
 ---
 
-## Rules of thumb
+## The shape of a good infra tool
 
-- **One tool, one job.** A CLI that does one thing well composes; a
-  Swiss-army tool is rewritten by the next team anyway.
-- **Idempotent by default.** An infra tool may be run twice; make the
-  second run a no-op (the same contract as Ansible tasks).
-- **Observability in the tool.** Emit the trace and the metrics from
-  day one — the tool's own runtime becomes diagnosable like everything
-  else it manages.
-- **Test the happy path against a real target.** The stdlib makes it
-  easy to fake; the fleet is where the surprises live.
+**Input and output contract**
 
-## Why it matters
+```
+stationctl status --host beam01 --format json
+```
 
-Every `mcl-*` client, agent, and helper on the mesh is this shape:
-flags in, work over the network, structured output out. The Go
-patterns here are the house style for the tooling layer — know them
-and a new tool reads like a familiar one.
+- Configuration from flags and environment variables; nothing
+  interactive, so it runs the same from a terminal, CI or a timer.
+- Results on stdout in a machine-readable format (JSON), diagnostics on
+  stderr. Scripts can pipe the one and log the other.
+- Exit code 0 for success, non-zero for failure, and distinct codes
+  when callers need to tell failures apart.
+
+**Deadlines everywhere**
+
+Every network call, subprocess and remote session should carry a
+`context.Context` with a timeout, and the tool should cancel cleanly on
+Ctrl-C (`signal.NotifyContext`). Unattended tools meet unreachable
+hosts; one that hangs forever blocks the job that called it.
+
+```go
+ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+defer cancel()
+out, err := exec.CommandContext(ctx, "systemctl", "is-active", "pingd").Output()
+```
+
+**Where the work comes from**
+
+| Need | Package |
+|------|---------|
+| Files and paths | `os`, `io/fs`, `path/filepath` (stdlib) |
+| JSON, CSV, XML | `encoding/json`, `encoding/csv`, `encoding/xml` (stdlib) |
+| HTTP APIs | `net/http` with a client timeout (stdlib) |
+| Running commands | `os/exec` (stdlib) |
+| Structured logs | `log/slog` (stdlib) |
+| SSH to hosts | `golang.org/x/crypto/ssh` (Go project's extended library, not stdlib) |
+| YAML | a third-party module; the stdlib has none |
+| Traces and metrics | OpenTelemetry Go SDK (third-party) |
+
+Prefer the standard library and the `golang.org/x` modules; every extra
+dependency is something to audit and update across the fleet.
+
+---
+
+## Practices and pitfalls
+
+- **One tool, one job.** Small tools compose in scripts; a tool that
+  does everything is hard to test and gets rewritten.
+- **Make reruns safe.** A tool may be retried after a timeout; the
+  second run should find the work done and change nothing, the same
+  contract as an [Ansible](../iac/ANSIBLE.md) task.
+- **Watch cgo.** Some packages (`net`, `os/user`) can use the C library
+  on Linux, which makes the binary dynamically linked. Build with
+  `CGO_ENABLED=0` when you need a truly static binary; cgo is off by
+  default when cross-compiling anyway.
+- **Instrument the tool.** Emit its own logs, metrics or traces so a
+  failed run can be diagnosed like any other service; see
+  [Observability](../observability/OBSERVABILITY.md).
+- **Test against a real target too.** Interfaces make faking easy, but
+  the surprises live in real SSH servers, real APIs and real timeouts.
+
+## How it fits the corpus
+
+The `mcl-*` clients, agents and helpers follow this shape: flags in,
+work over the network with deadlines, structured output out. Knowing
+the pattern makes a new tool read like a familiar one.
+
+## Sources
+
+- *Go for DevOps*. John Doak, David Justice. Packt Publishing, 2022. https://www.packtpub.com/en-us/product/go-for-devops-9781801819343
+- *Learning Go*, 2nd edition. Jon Bodner. O'Reilly Media, 2024. https://www.oreilly.com/library/view/learning-go-2nd/9781098139285/
+- Go documentation. https://go.dev/doc/
+- Go, "Installing Go from source" (GOOS and GOARCH values). https://go.dev/doc/install/source
+- Go packages: `context` https://pkg.go.dev/context , `os/exec` https://pkg.go.dev/os/exec , `log/slog` https://pkg.go.dev/log/slog , `os/signal` https://pkg.go.dev/os/signal
+- Go, `cmd/cgo` (cgo defaults and cross-compilation). https://pkg.go.dev/cmd/cgo
+- `golang.org/x/crypto/ssh`. https://pkg.go.dev/golang.org/x/crypto/ssh
+- OpenTelemetry, "Go". https://opentelemetry.io/docs/languages/go/

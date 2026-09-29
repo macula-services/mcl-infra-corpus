@@ -7,79 +7,111 @@ stage: stable
 
 # IaC: Terraform
 
-*Declare resources across providers; Terraform plans the transition and reconciles through a state file. The plan is the contract.*
+*You describe resources in HCL; Terraform compares that description with its state file and the real world, shows you the difference as a plan, and applies it. Reading the plan is the job.*
 
 ---
 
-## The model
+## How it works
+
+Terraform itself knows nothing about clouds. **Providers** (plugins)
+translate between Terraform and an API: AWS, Hetzner, Proxmox,
+Cloudflare DNS, GitHub. You write **resources** against a provider:
 
 ```hcl
-resource "aws_instance" "web" {
-  ami           = "ami-123"
-  instance_type = "t3.micro"
+terraform {
+  required_providers {
+    hcloud = { source = "hetznercloud/hcloud", version = "~> 1.48" }
+  }
+}
+
+resource "hcloud_server" "station" {
+  name        = "station-fsn-1"
+  server_type = "cx23"
+  image       = "debian-12"
+  location    = "fsn1"
 }
 ```
 
-The configuration declares **resources** (for a **provider**: AWS,
-Proxmox, GitHub, DNS…). Terraform reads the current reality through the
-provider, compares it with the configuration and its **state**, and
-computes a **plan** — the exact transition to the declared state.
+Terraform records what it created in a **state** file, which maps
+`hcloud_server.station` to the real server id. On each run it refreshes
+that state from the provider, compares it with the configuration, and
+proposes create, update-in-place, replace or destroy actions.
 
 ---
 
-## The workflow
+## The commands
 
-| Command | What it does |
-|---------|--------------|
-| `terraform init` | Downloads providers and modules, initialises the working directory. Safe to repeat. |
-| `terraform plan` | Diffs state + config against reality; prints the transition. **Read it.** |
-| `terraform apply` | Executes the plan. |
-| `terraform destroy` | Tears down what the state manages. |
+| Command | Does |
+|---------|------|
+| `terraform init` | Installs providers and modules, configures the backend. Safe to rerun. |
+| `terraform plan` | Refreshes state, diffs against the config, prints proposed actions. Changes nothing. `-out=plan.bin` saves it. |
+| `terraform apply` | Makes the changes (from a fresh plan, or exactly the saved one). |
+| `terraform plan -refresh-only` | Shows what changed outside Terraform, without proposing to undo it. |
+| `terraform destroy` | Removes everything this state manages. |
 
-The discipline is in the plan: *fully understand the plan output before
-applying* — an unexpected deletion line in the plan is drift or a
-mistake caught before it hits production.
-
----
-
-## State — the single source of truth
-
-The **state file** records what Terraform manages: resource ids, the
-mapping between config and reality. Two rules follow:
-
-- **State is where the power lives.** Losing it orphanes live
-  infrastructure; store it remotely (a backend), lock it against
-  concurrent applies.
-- **Secrets in state leak.** Sensitive outputs must be marked
-  `sensitive`, or better, kept out of state entirely.
-
-Drift is simply *reality − state*: changes made outside Terraform show
-up in the next plan as differences to reconcile.
+In a pipeline, save the plan, have a human or a policy check read it,
+then apply that exact file. The line to look for is a `-/+` (replace) or
+`-` (destroy) you did not expect: a changed attribute that forces a
+new server, for example, will destroy the old one.
 
 ---
 
-## Modules and structure
+## State
 
-A **module** bundles resources with inputs and outputs — the function
-of IaC. The standard layout:
+The state file is how Terraform knows what it owns.
+
+- **Keep it remote and locked.** A backend (S3-compatible bucket, HCP
+  Terraform, Postgres...) lets a team share it and stops two applies
+  running at once. A lost state file leaves real resources that
+  Terraform no longer knows about.
+- **Assume it contains secrets.** `sensitive = true` only hides a
+  value in CLI output; it is still written to state and plan files in
+  plain text. To keep a value out of state entirely, use ephemeral
+  values (Terraform 1.10+) or write-only arguments (1.11+) where the
+  provider supports them, and restrict access to the backend.
+- **Drift** shows up as a diff on the next plan: someone changed the
+  resource outside Terraform. Decide whether to accept it (update the
+  code) or revert it (apply).
+
+---
+
+## Modules and versions
+
+A **module** is a directory of `.tf` files with input variables and
+outputs; calling it is the IaC equivalent of calling a function. A
+common layout keeps environments thin:
 
 ```
-environments/staging/main.tf     # thin: which modules, which values
-modules/web/                     # the reusable bundle
+modules/station/        # the reusable part
+envs/staging/main.tf    # calls modules/station with staging values
+envs/prod/main.tf       # same module, prod values, own state
 ```
 
-Rules of thumb:
+- **Environments as directories with separate state**, not long-lived
+  git branches that drift apart.
+- **Constrain provider versions and commit `.terraform.lock.hcl`.** The
+  lock file fixes the exact provider versions; they only move when
+  someone runs `terraform init -upgrade`.
+- **Pin module versions exactly.** The lock file does not cover
+  modules; a loose constraint picks up the newest match whenever modules
+  are installed fresh (a new checkout, a CI runner, `init -upgrade`).
+- **Keep abstractions shallow.** If a reviewer cannot tell from the
+  plan what will happen, the module is hiding too much.
 
-- **Environments are directories, not branches.** Each environment
-  dir pins module versions; branches that diverge become drift.
-- **Pin provider and module versions.** An unpinned provider upgrades
-  under you mid-apply.
-- **Resources are nouns, plans are diffs.** If you cannot read the
-  plan, your abstraction layer is too clever.
+## How it fits the corpus
 
-## Why it matters
+Terraform is the "what resources exist" layer of the
+[IaC principles](IAC_PRINCIPLES.md): it creates machines, networks and
+DNS, then hands over to [Ansible](ANSIBLE.md) for what runs on them.
+Below it sits [bare-metal provisioning](BARE_METAL_PROVISIONING.md)
+for hardware that no cloud API creates.
 
-Terraform is the mesh's answer to "who owns this box's resources and
-how did it get this way" — the same question IaC answers everywhere.
-The state file is what makes the answer checkable: every resource is
-declared, every change is a reviewed diff.
+## Sources
+
+- *Architecting AWS with Terraform*. Erol Kavas. Packt Publishing, 2023. https://www.packtpub.com/en-us/product/architecting-aws-with-terraform-9781803248561
+- HashiCorp, "What is Terraform?". https://developer.hashicorp.com/terraform/intro
+- HashiCorp, "terraform plan command reference". https://developer.hashicorp.com/terraform/cli/commands/plan
+- HashiCorp, "State" and "State: Remote Storage". https://developer.hashicorp.com/terraform/language/state and https://developer.hashicorp.com/terraform/language/state/remote
+- HashiCorp, "Manage sensitive data in your configuration". https://developer.hashicorp.com/terraform/language/manage-sensitive-data
+- HashiCorp, "Dependency Lock File". https://developer.hashicorp.com/terraform/language/files/dependency-lock
+- HashiCorp, "Modules overview". https://developer.hashicorp.com/terraform/language/modules

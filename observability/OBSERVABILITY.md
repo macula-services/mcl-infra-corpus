@@ -7,67 +7,91 @@ stage: stable
 
 # Observability: The Three Pillars
 
-*Metrics, logs, and traces — the golden triangle. Each answers a different question; none answers all three.*
+*Metrics tell you something is off, traces tell you where, logs tell you why. Observability is having all three, correlated, so you can answer a question you did not plan for.*
 
 ---
 
-## The three pillars
+## The three core signals
 
-| Signal | Nature | Answers |
-|--------|--------|---------|
-| **Metric** | A number measured over time (CPU %, request count, latency) | "Is it wrong?" — cheap, aggregate, alertable |
-| **Log** | A discrete timestamped record of an event | "What happened?" — detail, but per instance, noisy at scale |
-| **Trace** | A request's path across services, spans per hop | "Where in the journey?" — latency attribution, dependency maps |
+| Signal | Shape | Good for | Weak at |
+|--------|-------|----------|---------|
+| **Metrics** | Numeric time series with labels (`http_requests_total{status="500"}`) | Dashboards, alerts, trends; cheap to store and query | Explaining a single failure; high-cardinality labels blow up cost |
+| **Logs** | Timestamped records of individual events | Detail about one request or error | Aggregation at scale; volume and cost |
+| **Traces** | A tree of timed spans following one request across services | Finding which hop is slow or failing | Everything outside the request path; usually sampled |
 
-Metrics spot the problem; traces localize it; logs explain it. An
-observability platform that links them lets you click from a spiking
-metric to the traces, then to the exact log lines of the slow span.
+A typical investigation: an alert fires on the error-rate metric, an
+exemplar or trace id leads to a slow trace, the slow span's trace id
+finds the log lines that explain it. That hand-off only works if the
+signals share identifiers (service name, instance, trace id).
 
----
-
-## Beyond the triangle
-
-The three pillars are not the only signals — the right signal depends
-on the abstraction layer you observe:
-
-| Signal | Layer | Use |
-|--------|-------|-----|
-| **Profiling data** | CPU/RAM stack traces | Find the hot function; with cloud billed hourly, this creates cost savings directly |
-| **Events** | Platform level (CI/CD, deploys) | "A deploy happened 3 minutes before the incident" — MTTR's best friend; a whole action vs five logs of its stages |
+OpenTelemetry standardises how all three are produced and shipped
+(with baggage for passing context along). In the Grafana stack they are
+stored by Prometheus or Mimir (metrics), Loki (logs) and Tempo (traces),
+with Grafana on top for querying and correlation.
 
 ---
 
-## The personas — design from the questions
+## Other useful signals
 
-The platform's design starts from *who asks what*:
-
-| Persona | Typical question |
-|---------|------------------|
-| **Developer** | "Is my service doing what I expect under load?" |
-| **Operator / SRE** | "Which service broke first, and how do I roll back?" |
-| **Service manager** | "Are we meeting the SLO this week?" |
-| **Product** | "Which feature do users actually reach?" |
-| **Manager** | "What is the cost of this platform, and its value?" |
-
-Each persona needs a different slice of the same data — the dashboard
-for the operator is not the dashboard for the product owner. Build
-persona-first, not metric-first.
+- **Continuous profiling**: sampled stack traces over time (Grafana
+  Pyroscope, OpenTelemetry profiles, still in development). Answers
+  "which function is burning the CPU", which on metered hosts is also a
+  cost question.
+- **Change events**: deploys, config changes, feature-flag flips shown
+  as annotations. A large share of incidents start with a change, so
+  seeing "deploy at 14:02" next to "errors from 14:03" shortens most
+  investigations.
 
 ---
 
-## The golden signals
+## Start from the questions
 
-Whatever the stack, watch these four first: **latency, traffic,
-errors, saturation.** They cover most failure modes, they are cheap to
-collect, and they are the base every alerting policy should start from.
+Different people ask different things of the same data:
 
-## Rules of thumb
+- someone who wrote the service: is my change behaving under real load?
+- whoever is on call: what broke first, and what do I roll back?
+- someone owning a service level: are we inside our error budget?
+- someone paying for it: what does this cost, and is it worth it?
 
-- **Alert on symptoms, not causes.** "Requests failing" is a symptom;
-  "disk full" is a cause. Users feel symptoms.
-- **Link the pillars.** A metric dashboard that cannot jump to traces
-  and logs is three silos, not observability.
-- **Logs are streams, not files.** Structure them (JSON), tag them
-  with service/instance/trace id — the link is what makes them useful.
-- **Instrument the boundary.** Outbound calls and queue operations are
-  where latency hides; instrument them before the internals.
+Build dashboards and alerts for those questions, not a wall of every
+metric that happens to be exported.
+
+---
+
+## The four golden signals
+
+For any request-serving system, the Google SRE book recommends watching
+**latency** (separating successful from failed requests), **traffic**,
+**errors** and **saturation**. They cover most user-visible failures
+and make a sensible first dashboard and alert set.
+
+---
+
+## Practices and pitfalls
+
+- **Page on symptoms, investigate causes.** Alert on what users feel
+  (errors, latency); a full disk or a restarting pod is a cause to show
+  on a dashboard, and to alert on only when it is certain and imminent.
+- **Structure logs.** Key-value or JSON with service, instance and
+  trace id; free text cannot be joined to anything.
+- **Watch label cardinality.** A user id or request id as a metric
+  label creates a series per value and can take down the metrics store.
+- **Instrument the edges first.** Inbound requests, outbound calls,
+  queues and database calls are where latency and errors show up.
+
+## How it fits the corpus
+
+Metrics, logs and traces are what make the services deployed with
+[Docker](../containers/DOCKER.md) and supervised by
+[systemd](../linux/SYSTEMD.md) debuggable; journald is the first log
+source on every box. The [Go tooling](../tooling/GO_FOR_INFRA.md) note
+applies the same idea to the tools themselves.
+
+## Sources
+
+- *Observability with Grafana*. Rob Chapman, Peter Holmes. Packt Publishing, 2024. https://www.packtpub.com/en-us/product/observability-with-grafana-9781803248004
+- Betsy Beyer, Chris Jones, Jennifer Petoff, Niall Richard Murphy (eds.), *Site Reliability Engineering*, O'Reilly Media, 2016; chapter "Monitoring Distributed Systems" (free online, CC BY-NC-ND 4.0). https://sre.google/sre-book/monitoring-distributed-systems/
+- OpenTelemetry, "Signals". https://opentelemetry.io/docs/concepts/signals/
+- Grafana Labs, "Introduction" (Grafana fundamentals). https://grafana.com/docs/grafana/latest/fundamentals/
+- Grafana Labs, "About Grafana". https://grafana.com/docs/grafana/latest/introduction/
+- Grafana Labs, "Grafana Pyroscope" (continuous profiling). https://grafana.com/docs/pyroscope/latest/

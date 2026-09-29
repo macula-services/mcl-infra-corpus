@@ -7,92 +7,145 @@ stage: stable
 
 # Linux: systemd
 
-*The init system and service manager: units describe what runs, targets group them, journald keeps the logs, timers schedule.*
+*PID 1 on most Linux distributions: it starts, supervises and orders everything else. You describe each thing in a small unit file; systemd handles dependencies, restarts, logging and schedules.*
 
 ---
 
-## The unit
+## Units
 
-A **unit** is the thing systemd manages. The kind is the file suffix:
+Everything systemd manages is a **unit**, and the file suffix says what
+kind:
 
-| Suffix | Unit kind |
-|--------|-----------|
-| `.service` | A long-running process |
-| `.timer` | A schedule, activating another unit |
-| `.mount` / `.automount` | Filesystems |
-| `.socket` | Socket activation |
-| `.path` | React to filesystem changes |
-| `.target` | A group of units (a boot level, a state) |
+| Suffix | Manages |
+|--------|---------|
+| `.service` | A process (daemon or one-shot job) |
+| `.socket` | A listening socket that starts a service on first connection |
+| `.timer` | A schedule that starts another unit |
+| `.mount`, `.automount` | Filesystem mounts |
+| `.path` | Watches a path and starts a unit when it changes |
+| `.target` | A named group of units, used as a synchronisation point (e.g. `multi-user.target`) |
+
+A minimal service for a small HTTP daemon:
 
 ```ini
+# /etc/systemd/system/pingd.service
 [Unit]
-Description=My service
-After=network.target
+Description=Ping responder
+Wants=network-online.target
+After=network-online.target
 
 [Service]
-ExecStart=/usr/local/bin/myapp
-Restart=always
+ExecStart=/opt/pingd/bin/pingd --port 8080
+Restart=on-failure
+User=pingd
 
 [Install]
 WantedBy=multi-user.target
 ```
 
-`[Install]` says *when*: `WantedBy=multi-user.target` wires the unit
-into the normal boot target.
+`[Unit]` holds ordering and dependencies (`After=` orders, `Wants=` /
+`Requires=` pull in). `[Service]` says how to run it. `[Install]` is only
+read by `systemctl enable`, which links the unit into the named target
+so it starts at boot. Units for a user session live in
+`~/.config/systemd/user/` and are driven with `systemctl --user`.
 
 ---
 
-## Managing units
+## Day-to-day commands
 
 ```bash
-systemctl status myapp      # state + last log lines
-systemctl start|stop|restart myapp
-systemctl enable|disable myapp     # start at boot, or not
-systemctl daemon-reload            # after editing unit files
+systemctl status pingd          # state, main PID, recent log lines
+systemctl restart pingd
+systemctl enable --now pingd    # start at boot and start now
+systemctl daemon-reload         # re-read unit files after editing them
+systemctl list-units --failed   # what is broken right now
+systemctl edit pingd            # drop-in override in pingd.service.d/
 ```
 
-The workflow that matters: edit the unit → `daemon-reload` →
-`restart`. Skipping the reload is the classic "why didn't my change
-take?" mistake.
+Edit, then `daemon-reload`, then restart. Forgetting the reload means
+systemd keeps using the old definition. Prefer `systemctl edit` drop-ins
+over editing a vendor unit in `/usr/lib/systemd/system/`, which a
+package upgrade will overwrite.
 
 ---
 
-## journald
+## The journal
 
-systemd's structured logger: every service's stdout/stderr lands in the
-journal.
+`systemd-journald` collects stdout/stderr of every unit plus kernel and
+syslog messages, with metadata (unit, PID, boot id) attached, so you can
+filter instead of grep:
 
 ```bash
-journalctl -u myapp          # one unit's logs
-journalctl -u myapp -f       # follow
-journalctl --since today     # time window
-journalctl -b -1             # previous boot
+journalctl -u pingd             # one unit
+journalctl -u pingd -f          # follow
+journalctl -u pingd --since "1 hour ago"
+journalctl -b -1 -p err         # errors from the previous boot
 ```
 
-The journal is indexed and queryable — richer than flat log files, at
-the cost of a binary format and (by default) an in-memory journal that
-vanishes on boot unless configured persistent.
+Whether logs survive a reboot depends on `Storage=` in `journald.conf`.
+With `auto`, the long-standing default, logs are kept on disk only if
+`/var/log/journal` exists and otherwise live in `/run` and are lost on
+reboot. Current upstream documents `persistent` as the default but
+fixes it at compile time, so distributions differ: check the directory
+and the config on a new box rather than assume. Old boots missing
+from `journalctl --list-boots` is the symptom.
 
 ---
 
-## Timers vs cron
+## Timers instead of cron
 
-Cron still works; **systemd timers** are the modern answer:
+A timer is a unit that starts another unit, by default the service with
+the same name (`backup.timer` starts `backup.service`).
 
-- A timer is a unit, so it is managed, logged, and supervised like
-  everything else.
-- `OnCalendar=` schedules (cron-like); `OnUnitActiveSec=` and
-  monotonic timers survive missed runs and reboots predictably.
-- Timer + service = two units: the timer triggers the service; the
-  service's logs go to the journal with its own name.
+```ini
+# backup.timer
+[Timer]
+OnCalendar=*-*-* 03:00
+Persistent=true
 
-Rule of thumb: for anything a cron line does, a timer unit does with
-better failure visibility. Cron remains for the one-off quick job.
+[Install]
+WantedBy=timers.target
+```
 
-## Why it matters
+- `OnCalendar=` is wall-clock scheduling, like a cron line.
+- `OnBootSec=` and `OnUnitActiveSec=` are monotonic: "10 minutes after
+  boot", "every 15 minutes since the last run".
+- `Persistent=true` (only meaningful with `OnCalendar=`) runs a missed
+  job right away if the machine was off at the scheduled time.
+- `systemctl list-timers` shows the next and last run of every timer.
 
-On a fleet box, systemd is the layer below the containers: every
-service the mesh runs is a unit (or a Quadlet container unit), and
-"is it running, what did it log, will it come back after reboot" is
-three `systemctl`/`journalctl` commands answered the same way for
-everything.
+Compared with cron you get the job's output in the journal under its own
+unit name, a visible failed state, resource limits and dependencies. The
+cost is two files instead of one line.
+
+---
+
+## Pitfalls
+
+- `After=network.target` does not wait for a usable network; use
+  `network-online.target` with `Wants=` when the service needs it.
+- `Restart=always` on a crashing service will loop until the start rate
+  limit (`StartLimitBurst=`) trips, then stay failed.
+- User units stop when the user logs out unless lingering is enabled
+  (`loginctl enable-linger`).
+
+## How it fits the corpus
+
+systemd sits directly under the containers on a fleet box. On the podman
+host, Quadlet `.container` files are turned into ordinary service units,
+so "is it up, what did it log, will it come back after a reboot" is
+answered with the same three commands for everything. See
+[Docker](../containers/DOCKER.md) for the container side.
+
+## Sources
+
+- *The Linux DevOps Handbook*. Damian Wojsław, Grzegorz Adamowicz. Packt Publishing, 2023. https://www.packtpub.com/en-us/product/the-linux-devops-handbook-9781803245669
+- systemd project site. https://systemd.io/
+- systemd.io, "Running Services After the Network Is Up". https://systemd.io/NETWORK_ONLINE/
+- systemd.unit(5). https://man7.org/linux/man-pages/man5/systemd.unit.5.html
+- systemd.service(5). https://man7.org/linux/man-pages/man5/systemd.service.5.html
+- systemd.timer(5). https://man7.org/linux/man-pages/man5/systemd.timer.5.html
+- journald.conf(5). https://man7.org/linux/man-pages/man5/journald.conf.5.html
+- journalctl(1). https://man7.org/linux/man-pages/man1/journalctl.1.html
+- systemctl(1). https://man7.org/linux/man-pages/man1/systemctl.1.html
+- Upstream copies of the same man pages (may block automated clients): https://www.freedesktop.org/software/systemd/man/latest/
