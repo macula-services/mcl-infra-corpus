@@ -46,6 +46,7 @@ Infrastructure as declarative text.
 | [IAC_PRINCIPLES](iac/IAC_PRINCIPLES.md) | Declarative state, idempotency, immutability, drift |
 | [TERRAFORM](iac/TERRAFORM.md) | Providers, state, plan/apply |
 | [ANSIBLE](iac/ANSIBLE.md) | Agentless SSH, inventory, playbooks |
+| [BARE_METAL_PROVISIONING](iac/BARE_METAL_PROVISIONING.md) | MAAS: enroll, inventory, commission, deploy, release |
 
 ### Observability — `observability/`
 
